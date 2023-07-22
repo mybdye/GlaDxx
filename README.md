@@ -1,6 +1,7 @@
 [![GlaDxx](https://github.com/mybdye/GlaDxx/actions/workflows/main.yml/badge.svg)](https://github.com/mybdye/GlaDxx/actions/workflows/main.yml)
 
 #### ✏️ NOTE
+- 2023.07.23 Switch to the api method 🚀
 - 2023.04.01 add user traffic info
 - 2023.01.19 fix cookie error notification
 - 2022.12.22 add expiration judgment
@@ -9,7 +10,7 @@
 - 2022.11.08
   - use [json] instead of [replace]
   - remove save_cookies file
-- 2022.11.06 build, 每次运行时间约 1 分钟
+- 2022.11.06 first build
 
 #### 🌟️ SUGGESTION
 ```diff
@@ -35,7 +36,7 @@ schedule:
 #### ㊙️ SECRET
   |YOU SECRET NAME|YOU SECRET VALUE|
   |-----|--|
-  |`COOKIES`| cookies |
+  |`COOKIES`| cookies，多账户请换行 |
   |`BARK_TOKEN`|(可选) api.day.app/`BARK_TOKEN`/ 详见 https://github.com/Finb/Bark|
   |`TG_BOT_TOKEN`|(可选) `xxxxxx:xxxxxxxxxxxxx`|
   |`TG_USER_ID`|(可选) 给 bot `@userinfobot` 发送 `/start`|
