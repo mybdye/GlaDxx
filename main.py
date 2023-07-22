@@ -71,7 +71,7 @@ data = {
 #
 def checkin():
     body = []
-    for cookies in cookiesList.split('#'):
+    for cookies in cookiesList.splitlines():
         # print(cookies)
         headers = {
             "cookie": cookies
