@@ -9,7 +9,7 @@ def url_decode(s):
 
 #
 def push(body):
-    print('- body: %s \n- waiting for push result' % body)
+    print('- body:\n %s \n- waiting for push result' % body)
     # bark push
     if barkToken == '':
         print('*** No BARK_KEY ***')
