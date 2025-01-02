@@ -96,7 +96,7 @@ def checkin():
             "cookie": cookies
         }
         r_checkin = requests.post(url=checkinUrl, headers=headers, data=data)
-        r_status = requests.get(url=statusUrl, headers=headers, timeout=10)
+        r_status = requests.get(url=statusUrl, headers=headers, timeout=30)
         try:
             s = 'email:%s***\nstatus:%s\ntraffic:%.2f GB\nleftDays:%s\ndetail:%s' % (r_status.json()["data"]["email"][:3], r_checkin.json()["message"], float(r_status.json()["data"]["traffic"]/1024/1024/1024), int(float(r_status.json()["data"]["leftDays"])), r_checkin.json()["list"][0]["detail"])
         except KeyError as e:
