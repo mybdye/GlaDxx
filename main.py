@@ -64,7 +64,7 @@ def push(body):
 #####
 checkinUrl = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvY2hlY2tpbg==')
 statusUrl = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvc3RhdHVz')
-token = url_decode('Z2xhZG9zLm9uZQ==')
+token = url_decode('Z2xhZG9zLmNsb3Vk')
 data = {
     "token": token
 }
