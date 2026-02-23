@@ -62,8 +62,8 @@ def push(body):
     print('- finish!')
 
 #####
-checkinUrl = url_decode('aHR0cHM6Ly9nbGFkb3Mucm9ja3MvYXBpL3VzZXIvY2hlY2tpbg==')
-statusUrl = url_decode('aHR0cHM6Ly9nbGFkb3Mucm9ja3MvYXBpL3VzZXIvc3RhdHVz')
+checkinUrl = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvY2hlY2tpbg==')
+statusUrl = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvc3RhdHVz')
 token = url_decode('Z2xhZG9zLm9uZQ==')
 data = {
     "token": token
