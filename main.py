@@ -23,7 +23,7 @@ def push(body):
         barktitle = 'Glaxxx-Checkin'
         encoded_body = quote(body, safe='')
         try:
-            rq_bark = requests.get(url=f'{barkurl}/{barktitle}/{encoded_body}?isArchive=1')
+            rq_bark = requests.get(url=f'{barkurl}/{barktitle}/{encoded_body}?group={barktitle}')
             if rq_bark.status_code == 200:
                 print('- bark push Done!')
             else:
