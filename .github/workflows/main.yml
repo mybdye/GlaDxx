@@ -1,16 +1,15 @@
-# This is a basic workflow to help you get started with Actions
-name: GlaDxx
+# GlaDxx 自动签到工作流
+name: GlaDxx Checkin
+
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
+  # 手动触发
+  workflow_dispatch:
+  # 定时执行 (UTC时间，对应北京时间上午11:02)
+  schedule:
+    - cron: '02 3 * * *'
+  # 代码推送时触发
   push:
     branches: [ "main" ]
-#   pull_request:
-#     branches: [ "main" ]
-  schedule:
-    # UTC (国内 UTC+8)
-    - cron: '02 3 * * *'
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
 
 jobs:
   build:
@@ -18,20 +17,20 @@ jobs:
     # 超时设置
     timeout-minutes: 3
     steps:
-      - name: checkout
-        uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
         
-      - name: Setup Python version
-        uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # caching pip dependencies
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
           
-      - name: Setup Environment
+      - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install requests
-     #     pip install -r ./requirements.txt  
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
         
       - name: Delete old workflow runs
         uses: MajorScruffy/delete-old-workflow-runs@v0.3.0
@@ -41,12 +40,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
-      - name: Checkin
+      - name: Execute checkin
         env:
           COOKIES: ${{ secrets.COOKIES }}
           BARK_TOKEN: ${{ secrets.BARK_TOKEN }}
           PUSHDEER_KEY: ${{ secrets.PUSHDEER_KEY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_USER_ID: ${{ secrets.TG_USER_ID }}
-        run: |  
-          python3 ./main.py
+        run: |
+          python main.py
