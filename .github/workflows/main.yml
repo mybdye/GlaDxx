@@ -1,5 +1,5 @@
-# GlaDOS自动签到工作流
-name: GlaDOS Checkin
+# GlaDxx 自动签到工作流
+name: GlaDxx Checkin
 
 on:
   # 手动触发
