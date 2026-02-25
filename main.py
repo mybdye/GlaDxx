@@ -86,7 +86,7 @@ def checkin():
                 leftDays = int(float(r_status.json()["data"]["leftDays"]))
                 s = f'email:{email}***\nstatus:{message}\ntraffic:{traffic:.2f} GB\nleftDays:{leftDays}'
                 if "list" in r_checkin.json():
-                    s += f'\ndetail:{r_checkin.json()["list"][0]["detail"]}'
+                    s += f'\n{r_checkin.json()["list"][0]["detail"]}'
             except KeyError as e:
                 s = f'email:{email}***\nerror:{e}\nPlease check the cookie or account expiration date!'
             except json.JSONDecodeError as e:
