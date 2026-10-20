@@ -9,7 +9,7 @@ import json
 import base64
 import logging
 from typing import Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -42,6 +42,8 @@ logging.basicConfig(
 
 # 环境变量配置
 COOKIES: str = os.getenv('COOKIES', '')
+# 可选：与登录网页端的浏览器保持一致；不配置时按服务端 loginDevice 自动重试
+BROWSER_UA: Optional[str] = os.getenv('BROWSER_UA', '').strip() or None
 BARK_TOKEN: Optional[str] = os.getenv('BARK_TOKEN')
 PUSHDEER_KEY: Optional[str] = os.getenv('PUSHDEER_KEY')
 TG_BOT_TOKEN: Optional[str] = os.getenv('TG_BOT_TOKEN')
@@ -109,10 +111,72 @@ def push_notification(message: str) -> None:
 CHECKIN_URL: str = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvY2hlY2tpbg==')
 STATUS_URL: str = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvc3RhdHVz')
 API_TOKEN: str = url_decode('Z2xhZG9zLmNsb3Vk')
+CHECKIN_ORIGIN: str = '{0.scheme}://{0.netloc}'.format(urlsplit(CHECKIN_URL))
 
 REQUEST_DATA: Dict[str, str] = {
     "token": API_TOKEN
 }
+
+# 服务端会校验签到请求的 UA 平台与登录设备平台是否一致，
+# 不一致时返回 code=4, reason=device-mismatch
+PLATFORM_UA: Dict[str, str] = {
+    'Windows': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+    'macOS': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+    'Linux': ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+    'iPhone': ('Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 '
+               '(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'),
+    'iPad': ('Mozilla/5.0 (iPad; CPU OS 16_0 like Mac OS X) AppleWebKit/605.1.15 '
+             '(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'),
+    'Android': ('Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'),
+}
+
+DEVICE_ALIASES: Dict[str, str] = {
+    'mac': 'macOS',
+    'macos': 'macOS',
+    'mac os x': 'macOS',
+    'macintosh': 'macOS',
+    'windows': 'Windows',
+    'linux': 'Linux',
+    'iphone': 'iPhone',
+    'ios': 'iPhone',
+    'ipad': 'iPad',
+    'ipados': 'iPad',
+    'android': 'Android',
+}
+
+DEFAULT_USER_AGENT: str = BROWSER_UA or PLATFORM_UA['macOS']
+
+def ua_for_device(device: Optional[str]) -> Optional[str]:
+    """按服务端返回的 loginDevice 选择对应平台的 UA"""
+    if not device:
+        return None
+    return PLATFORM_UA.get(DEVICE_ALIASES.get(device.strip().lower(), ''))
+
+def build_headers(cookie: str, user_agent: str) -> Dict[str, str]:
+    """构造与浏览器一致的请求头，UA 平台需与登录设备一致"""
+    return {
+        'cookie': cookie,
+        'user-agent': user_agent,
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'origin': CHECKIN_ORIGIN,
+        'referer': f'{CHECKIN_ORIGIN}/console/checkin',
+    }
+
+def request_checkin(session: requests.Session, cookie: str, user_agent: str) -> Dict:
+    """发起一次签到请求并返回响应 JSON"""
+    response = session.post(
+        url=CHECKIN_URL,
+        headers=build_headers(cookie, user_agent),
+        data=REQUEST_DATA,
+        timeout=30
+    )
+    response.raise_for_status()
+    return response.json()
 
 def create_session() -> requests.Session:
     """创建带有重试机制的HTTP会话
@@ -147,44 +211,49 @@ def checkin() -> None:
         if not cookie_line.strip():
             continue
             
-        headers = {"cookie": cookie_line.strip()}
-        result = process_account(session, headers)
+        result = process_account(session, cookie_line)
         results.append(result)
     
     # 发送聚合通知
     final_message = '\n\n---\n\n'.join(results)
     push_notification(final_message)
 
-def process_account(session: requests.Session, headers: Dict[str, str]) -> str:
+def process_account(session: requests.Session, cookie_line: str) -> str:
     """处理单个账户的签到
     
     Args:
         session: HTTP会话对象
-        headers: 请求头
+        cookie_line: 单行Cookie
         
     Returns:
         处理结果字符串
     """
     try:
-        # 执行签到
-        checkin_response = session.post(
-            url=CHECKIN_URL,
-            headers=headers,
-            data=REQUEST_DATA,
-            timeout=30
-        )
-        checkin_response.raise_for_status()
-        
+        # 执行签到，UA 平台需与登录设备一致
+        user_agent = DEFAULT_USER_AGENT
+        checkin_data = request_checkin(session, cookie_line, user_agent)
+        login_device = checkin_data.get('loginDevice')
+
+        if checkin_data.get('code') == 4 and checkin_data.get('reason') == 'device-mismatch':
+            retry_ua = ua_for_device(login_device)
+            if retry_ua and retry_ua != user_agent:
+                logging.warning(f'签到被判定为自动化(loginDevice={login_device})，改用对应平台 UA 重试')
+                checkin_data = request_checkin(session, cookie_line, retry_ua)
+                login_device = checkin_data.get('loginDevice')
+            elif retry_ua:
+                logging.error(f'设备平台为 {login_device}，UA 已匹配但服务端仍拒绝，请重新登录并更新 Cookie')
+            else:
+                logging.error(f'无法识别的登录设备平台 {login_device}，请配置 BROWSER_UA')
+
         # 获取账户状态
         status_response = session.get(
             url=STATUS_URL,
-            headers=headers,
+            headers={"cookie": cookie_line},
             timeout=30
         )
         status_response.raise_for_status()
         
         # 解析响应数据
-        checkin_data = checkin_response.json()
         status_data = status_response.json()
         
         email_prefix = status_data["data"]["email"][:3]
@@ -204,19 +273,26 @@ def process_account(session: requests.Session, headers: Dict[str, str]) -> str:
             detail = checkin_data["list"][0].get("detail", "")
             if detail:
                 result_lines.append(detail)
+
+        # 签到仍失败时补充服务端判定原因
+        if checkin_data.get('code') == 4:
+            reason = checkin_data.get('reason', 'unknown')
+            result_lines.append(f'reason: {reason}' + (f' (loginDevice={login_device})' if login_device else ''))
+            if reason == 'device-mismatch':
+                result_lines.append('hint: 用登录网页端的浏览器重新复制完整 Cookie，或将 BROWSER_UA 设为该浏览器 UA')
                 
         return '\n'.join(result_lines)
         
     except KeyError as e:
-        email_preview = headers.get("cookie", "")[:3]
+        email_preview = cookie_line[:3]
         return f'email: {email_preview}***\nerror: 缺少必要字段 {e}\n请检查cookie或账户是否过期!'
         
     except json.JSONDecodeError as e:
-        email_preview = headers.get("cookie", "")[:3]
+        email_preview = cookie_line[:3]
         return f'email: {email_preview}***\nerror: JSON解析失败 {e}'
         
     except requests.RequestException as e:
-        email_preview = headers.get("cookie", "")[:3]
+        email_preview = cookie_line[:3]
         return f'email: {email_preview}***\nerror: 网络请求失败 {str(e)}'
 
 if __name__ == "__main__":

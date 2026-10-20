@@ -47,6 +47,7 @@
 | Secret Name | Description | Required |
 |-------------|-------------|----------|
 | `COOKIES` | GlaDxx账户Cookies，多账户请换行分隔 | ✅ Yes |
+| `BROWSER_UA` | 与登录网页端浏览器一致的User-Agent，仅在自动匹配失败时需要 | ❌ No |
 | `BARK_TOKEN` | Bark推送Token (可选) | ❌ No |
 | `PUSHDEER_KEY` | PushDeer推送Key (可选) | ❌ No |
 | `TG_BOT_TOKEN` | Telegram Bot Token (可选) | ❌ No |
@@ -77,6 +78,14 @@ schedule:
 │ └──────── 小时 (0-23)
 └────────── 分钟 (0-59)
 ```
+
+## 🩺 常见问题
+
+### 签到提示 `Automated check-in detected. Please sign in again to continue.`
+
+这是服务端的设备平台校验：签到请求的 User-Agent 平台必须与登录设备平台一致，否则判定为自动化签到。
+
+脚本默认使用 macOS Chrome 的 UA；若被拒绝，会读取响应中的 `loginDevice` 自动切换为对应平台 UA 重试一次。若仍失败，请用登录网页端的浏览器重新复制完整 Cookie（不要漏掉签名部分），并把该浏览器的完整 User-Agent 配置为 Secret `BROWSER_UA`。
 
 ## 📱 推送通知配置
 
