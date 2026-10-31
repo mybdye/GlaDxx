@@ -112,6 +112,17 @@ CHECKIN_URL: str = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvY2hlY2tpb
 STATUS_URL: str = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvc3RhdHVz')
 API_TOKEN: str = url_decode('Z2xhZG9zLmNsb3Vk')
 CHECKIN_ORIGIN: str = '{0.scheme}://{0.netloc}'.format(urlsplit(CHECKIN_URL))
+POINTS_URL: str = f'{CHECKIN_ORIGIN}/api/user/points'
+EXCHANGE_URL: str = f'{CHECKIN_ORIGIN}/api/user/exchange'
+
+# 剩余天数低于阈值时自动兑换一次，优先选择积分足够的最大档位
+EXCHANGE_THRESHOLD_DAYS: int = 7
+EXCHANGE_PLAN_ORDER: tuple = ('plan500', 'plan200', 'plan100')
+EXCHANGE_PLAN_FALLBACK: Dict[str, tuple] = {
+    'plan100': (100, 10),
+    'plan200': (200, 30),
+    'plan500': (500, 100),
+}
 
 REQUEST_DATA: Dict[str, str] = {
     "token": API_TOKEN
@@ -178,6 +189,40 @@ def request_checkin(session: requests.Session, cookie: str, user_agent: str) -> 
     response.raise_for_status()
     return response.json()
 
+def get_points(session: requests.Session, cookie: str, user_agent: str) -> Dict:
+    """查询当前积分与可兑换档位"""
+    response = session.get(
+        url=POINTS_URL,
+        headers=build_headers(cookie, user_agent),
+        timeout=30
+    )
+    response.raise_for_status()
+    return response.json()
+
+def request_exchange(session: requests.Session, cookie: str, user_agent: str, plan: str) -> Dict:
+    """按档位兑换会员天数，接口要求表单提交 planType"""
+    response = session.post(
+        url=EXCHANGE_URL,
+        headers=build_headers(cookie, user_agent),
+        data={'planType': plan},
+        timeout=30
+    )
+    response.raise_for_status()
+    return response.json()
+
+def pick_exchange_plan(points: int, plans: Dict) -> Optional[tuple]:
+    """按积分选择可负担的最大档位，返回 (plan, 所需积分, 天数)"""
+    for plan in EXCHANGE_PLAN_ORDER:
+        info = plans.get(plan) if isinstance(plans, dict) else None
+        if isinstance(info, dict):
+            need = int(float(info.get('points', 0)))
+            days = int(float(info.get('days', 0)))
+        else:
+            need, days = EXCHANGE_PLAN_FALLBACK.get(plan, (0, 0))
+        if need > 0 and points >= need:
+            return plan, need, days
+    return None
+
 def create_session() -> requests.Session:
     """创建带有重试机制的HTTP会话
     
@@ -229,6 +274,38 @@ def summarize_response(data) -> str:
     ]
     return ', '.join(parts) if parts else '无诊断字段'
 
+def auto_exchange(session: requests.Session, cookie: str, user_agent: str) -> List[str]:
+    """剩余天数不足时兑换一次，返回用于通知的结果行"""
+    try:
+        points_data = get_points(session, cookie, user_agent)
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        return [f'exchange: 跳过（积分查询失败: {type(e).__name__}）']
+
+    if not isinstance(points_data, dict) or 'points' not in points_data:
+        return [f'exchange: 跳过（积分接口异常: {summarize_response(points_data)}）']
+
+    try:
+        points = int(float(points_data['points']))
+    except (TypeError, ValueError):
+        return ['exchange: 跳过（积分格式异常）']
+
+    picked = pick_exchange_plan(points, points_data.get('plans', {}))
+    if not picked:
+        return [f'points: {points}', 'exchange: 跳过（积分不足 100）']
+
+    plan, need, days = picked
+    try:
+        result = request_exchange(session, cookie, user_agent, plan)
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        return [f'points: {points}', f'exchange: {plan} 请求失败（{type(e).__name__}）']
+
+    if isinstance(result, dict) and result.get('code') == 0:
+        return [
+            f'points: {points} -> {points - need}',
+            f'exchange: {plan} 成功（-{need}分 / +{days}天）',
+        ]
+    return [f'points: {points}', f'exchange: {plan} 失败（{summarize_response(result)}）']
+
 def process_account(session: requests.Session, cookie_line: str) -> str:
     """处理单个账户的签到
     
@@ -249,7 +326,8 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
             retry_ua = ua_for_device(login_device)
             if retry_ua and retry_ua != user_agent:
                 logging.warning(f'签到被判定为自动化(loginDevice={login_device})，改用对应平台 UA 重试')
-                checkin_data = request_checkin(session, cookie_line, retry_ua)
+                user_agent = retry_ua
+                checkin_data = request_checkin(session, cookie_line, user_agent)
                 login_device = checkin_data.get('loginDevice')
             elif retry_ua:
                 logging.error(f'设备平台为 {login_device}，UA 已匹配但服务端仍拒绝，请重新登录并更新 Cookie')
@@ -280,6 +358,11 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
         message = checkin_data.get("message") or summarize_response(checkin_data)
         traffic_gb = float(status_data["data"]["traffic"]) / (1024 ** 3)
         left_days = int(float(status_data["data"]["leftDays"]))
+
+        exchange_lines = (
+            auto_exchange(session, cookie_line, user_agent)
+            if left_days < EXCHANGE_THRESHOLD_DAYS else []
+        )
         
         result_lines = [
             f'email: {email_prefix}***',
@@ -287,6 +370,7 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
             f'traffic: {traffic_gb:.2f} GB',
             f'leftDays: {left_days}'
         ]
+        result_lines.extend(exchange_lines)
         
         # 添加详细信息（如果存在）
         if "list" in checkin_data and checkin_data["list"]:
