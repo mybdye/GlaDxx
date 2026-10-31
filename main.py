@@ -218,6 +218,17 @@ def checkin() -> None:
     final_message = '\n\n---\n\n'.join(results)
     push_notification(final_message)
 
+def summarize_response(data) -> str:
+    """提取响应中的诊断字段，不输出 Cookie 等敏感内容"""
+    if not isinstance(data, dict):
+        return f'响应类型异常({type(data).__name__})'
+    parts = [
+        f'{key}={data[key]}'
+        for key in ('code', 'message', 'reason', 'loginDevice')
+        if key in data
+    ]
+    return ', '.join(parts) if parts else '无诊断字段'
+
 def process_account(session: requests.Session, cookie_line: str) -> str:
     """处理单个账户的签到
     
@@ -255,9 +266,18 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
         
         # 解析响应数据
         status_data = status_response.json()
+
+        if not isinstance(status_data, dict) or not isinstance(status_data.get('data'), dict):
+            return '\n'.join([
+                f'email: {cookie_line[:3]}***',
+                'error: 状态接口未返回 data',
+                f'checkin: {summarize_response(checkin_data)}',
+                f'status: {summarize_response(status_data)}',
+                '请检查cookie或账户是否过期!'
+            ])
         
         email_prefix = status_data["data"]["email"][:3]
-        message = checkin_data["message"]
+        message = checkin_data.get("message") or summarize_response(checkin_data)
         traffic_gb = float(status_data["data"]["traffic"]) / (1024 ** 3)
         left_days = int(float(status_data["data"]["leftDays"]))
         
