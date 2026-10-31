@@ -116,8 +116,8 @@ POINTS_URL: str = f'{CHECKIN_ORIGIN}/api/user/points'
 EXCHANGE_URL: str = f'{CHECKIN_ORIGIN}/api/user/exchange'
 
 # 剩余天数低于阈值时自动兑换一次，优先选择积分足够的最大档位
-EXCHANGE_THRESHOLD_DAYS: int = 365
-EXCHANGE_PLAN_ORDER: tuple = ('plan100',)
+EXCHANGE_THRESHOLD_DAYS: int = 7
+EXCHANGE_PLAN_ORDER: tuple = ('plan500', 'plan200', 'plan100')
 EXCHANGE_PLAN_FALLBACK: Dict[str, tuple] = {
     'plan100': (100, 10),
     'plan200': (200, 30),
@@ -252,7 +252,7 @@ def checkin() -> None:
     session = create_session()
     results: List[str] = []
     
-    for cookie_line in COOKIES.splitlines()[:1]:
+    for cookie_line in COOKIES.splitlines():
         if not cookie_line.strip():
             continue
             
