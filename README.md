@@ -102,6 +102,27 @@ schedule:
 
 兑换成功时推送会显示兑换前后天数，例如 `leftDays: 103 -> 113`。
 
+## 📬 推送内容
+
+每个账号一段，多账号之间用 `---` 分隔，顶部是本次汇总：
+
+```
+accounts: 2/2 ok
+
+email: abc***
+result: ok
+status: Today's observation logged. Return tomorrow for more points.
+traffic: 11.96 GB
+leftDays: 113
+points: 1422 (+11 today)
+```
+
+- `accounts`：成功账号数 / 总账号数。
+- `result`：单个账号签到是否成功，失败时显示 `fail` 并附原因。
+- `points`：当前积分，括号内是本次签到所得；已签到或积分查询失败时不显示括号部分。
+- 剩余天数在 7~13 天时提示当前可兑换档位；低于 7 天直接兑换并显示 `leftDays: 旧 -> 新`。
+- 签到被判定为自动化后自动切换 UA 重试成功时，会显示 `ua: macOS -> Windows (auto retry)`。
+
 ## 📱 推送通知配置
 
 ### Bark 推送

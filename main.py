@@ -117,6 +117,8 @@ EXCHANGE_URL: str = f'{CHECKIN_ORIGIN}/api/user/exchange'
 
 # 剩余天数低于阈值时自动兑换一次，优先选择积分足够的最大档位
 EXCHANGE_THRESHOLD_DAYS: int = 7
+# 进入预警区间时在推送里提示可兑换档位
+EXCHANGE_WARN_DAYS: int = EXCHANGE_THRESHOLD_DAYS + 7
 EXCHANGE_PLAN_ORDER: tuple = ('plan500', 'plan200', 'plan100')
 EXCHANGE_PLAN_FALLBACK: Dict[str, tuple] = {
     'plan100': (100, 10),
@@ -166,6 +168,13 @@ def ua_for_device(device: Optional[str]) -> Optional[str]:
     if not device:
         return None
     return PLATFORM_UA.get(DEVICE_ALIASES.get(device.strip().lower(), ''))
+
+def ua_platform(user_agent: str) -> str:
+    """反查 UA 对应的平台名，用于推送里说明自动切换"""
+    for name, ua in PLATFORM_UA.items():
+        if ua == user_agent:
+            return name
+    return 'custom UA'
 
 def build_headers(cookie: str, user_agent: str) -> Dict[str, str]:
     """构造与浏览器一致的请求头，UA 平台需与登录设备一致"""
@@ -250,7 +259,7 @@ def checkin() -> None:
         return
     
     session = create_session()
-    results: List[str] = []
+    results: List[Dict] = []
     
     for cookie_line in COOKIES.splitlines():
         if not cookie_line.strip():
@@ -258,10 +267,11 @@ def checkin() -> None:
             
         result = process_account(session, cookie_line)
         results.append(result)
-    
+
     # 发送聚合通知
-    final_message = '\n\n---\n\n'.join(results)
-    push_notification(final_message)
+    ok_count = sum(1 for result in results if result['ok'])
+    body = '\n\n---\n\n'.join('\n'.join(result['lines']) for result in results)
+    push_notification(f'accounts: {ok_count}/{len(results)} ok\n\n{body}')
 
 def summarize_response(data) -> str:
     """提取响应中的诊断字段，不输出 Cookie 等敏感内容"""
@@ -274,37 +284,49 @@ def summarize_response(data) -> str:
     ]
     return ', '.join(parts) if parts else '无诊断字段'
 
-def auto_exchange(session: requests.Session, cookie: str, user_agent: str) -> tuple:
-    """剩余天数不足时兑换一次，返回 (通知结果行, 实际增加天数)"""
+def parse_points(data) -> Optional[int]:
+    """从积分接口响应中取出整数积分，取不到时返回 None"""
+    if not isinstance(data, dict) or 'points' not in data:
+        return None
     try:
-        points_data = get_points(session, cookie, user_agent)
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        return [f'exchange: 跳过（积分查询失败: {type(e).__name__}）'], 0
-
-    if not isinstance(points_data, dict) or 'points' not in points_data:
-        return [f'exchange: 跳过（积分接口异常: {summarize_response(points_data)}）'], 0
-
-    try:
-        points = int(float(points_data['points']))
+        return int(float(data['points']))
     except (TypeError, ValueError):
-        return ['exchange: 跳过（积分格式异常）'], 0
+        return None
+
+def account_result(ok: bool, lines: List[str]) -> Dict:
+    """单个账号的推送结果，ok 用于多账号汇总"""
+    return {'ok': ok, 'lines': lines}
+
+def auto_exchange(session: requests.Session, cookie: str, user_agent: str, points_data) -> tuple:
+    """用已查询到的积分兑换一次，返回 (通知结果行, 增加天数, 消耗积分)"""
+    points = parse_points(points_data)
+    if points is None:
+        return [f'exchange: 跳过（积分查询失败: {summarize_response(points_data)}）'], 0, 0
 
     picked = pick_exchange_plan(points, points_data.get('plans', {}))
     if not picked:
-        return [f'points: {points}', 'exchange: 跳过（积分不足 100）'], 0
+        return ['exchange: 跳过（积分不足）'], 0, 0
 
     plan, need, days = picked
     try:
         result = request_exchange(session, cookie, user_agent, plan)
     except (requests.RequestException, json.JSONDecodeError) as e:
-        return [f'points: {points}', f'exchange: {plan} 请求失败（{type(e).__name__}）'], 0
+        return [f'exchange: {plan} 请求失败（{type(e).__name__}）'], 0, 0
 
     if isinstance(result, dict) and result.get('code') == 0:
-        return [
-            f'points: {points} -> {points - need}',
-            f'exchange: {plan} 成功（-{need}分 / +{days}天）',
-        ], days
-    return [f'points: {points}', f'exchange: {plan} 失败（{summarize_response(result)}）'], 0
+        return [f'exchange: {plan} 成功（-{need}分 / +{days}天）'], days, need
+    return [f'exchange: {plan} 失败（{summarize_response(result)}）'], 0, 0
+
+def exchange_advice(points_data, left_days: int) -> List[str]:
+    """剩余天数进入预警区间时，提示当前积分可兑换的档位"""
+    points = parse_points(points_data)
+    if points is None:
+        return []
+    picked = pick_exchange_plan(points, points_data.get('plans', {}))
+    if not picked:
+        return [f'exchange: 剩余 {left_days} 天，积分不足（{points} 分）']
+    plan, need, days = picked
+    return [f'exchange: 剩余 {left_days} 天，可兑 {plan}（{need} 分 / +{days} 天）']
 
 def fetch_left_days(session: requests.Session, cookie: str) -> Optional[int]:
     """兑换后重新读取剩余天数，失败时返回 None"""
@@ -322,7 +344,7 @@ def fetch_left_days(session: requests.Session, cookie: str) -> Optional[int]:
         logging.warning(f'兑换后刷新天数失败: {type(e).__name__}')
     return None
 
-def process_account(session: requests.Session, cookie_line: str) -> str:
+def process_account(session: requests.Session, cookie_line: str) -> Dict:
     """处理单个账户的签到
     
     Args:
@@ -330,11 +352,18 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
         cookie_line: 单行Cookie
         
     Returns:
-        处理结果字符串
+        {'ok': 是否签到成功, 'lines': 推送文本行}
     """
     try:
+        # 签到前的积分，用于计算本次签到所得
+        try:
+            pre_points_data = get_points(session, cookie_line, DEFAULT_USER_AGENT)
+        except (requests.RequestException, json.JSONDecodeError):
+            pre_points_data = None
+
         # 执行签到，UA 平台需与登录设备一致
         user_agent = DEFAULT_USER_AGENT
+        ua_switch = None
         checkin_data = request_checkin(session, cookie_line, user_agent)
         login_device = checkin_data.get('loginDevice')
 
@@ -342,6 +371,7 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
             retry_ua = ua_for_device(login_device)
             if retry_ua and retry_ua != user_agent:
                 logging.warning(f'签到被判定为自动化(loginDevice={login_device})，改用对应平台 UA 重试')
+                ua_switch = f'{ua_platform(user_agent)} -> {ua_platform(retry_ua)}'
                 user_agent = retry_ua
                 checkin_data = request_checkin(session, cookie_line, user_agent)
                 login_device = checkin_data.get('loginDevice')
@@ -362,8 +392,9 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
         status_data = status_response.json()
 
         if not isinstance(status_data, dict) or not isinstance(status_data.get('data'), dict):
-            return '\n'.join([
+            return account_result(False, [
                 f'email: {cookie_line[:3]}***',
+                'result: fail',
                 'error: 状态接口未返回 data',
                 f'checkin: {summarize_response(checkin_data)}',
                 f'status: {summarize_response(status_data)}',
@@ -375,26 +406,55 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
         traffic_gb = float(status_data["data"]["traffic"]) / (1024 ** 3)
         left_days = int(float(status_data["data"]["leftDays"]))
 
+        # 签到后的积分，同时用于兑换与新余额展示
+        try:
+            points_data = get_points(session, cookie_line, user_agent)
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            logging.warning(f'积分查询失败: {type(e).__name__}')
+            points_data = None
+
         exchange_lines: List[str] = []
         gained_days = 0
+        spent_points = 0
         if left_days < EXCHANGE_THRESHOLD_DAYS:
-            exchange_lines, gained_days = auto_exchange(session, cookie_line, user_agent)
+            exchange_lines, gained_days, spent_points = auto_exchange(
+                session, cookie_line, user_agent, points_data
+            )
 
-        days_line = f'leftDays: {left_days}'
         if gained_days:
             original_days = left_days
             refreshed = fetch_left_days(session, cookie_line)
             # 状态接口可能有缓存，至少按兑换天数累加
             left_days = max(refreshed or 0, original_days + gained_days)
             days_line = f'leftDays: {original_days} -> {left_days}'
-        
+        else:
+            days_line = f'leftDays: {left_days}'
+            if EXCHANGE_THRESHOLD_DAYS <= left_days < EXCHANGE_WARN_DAYS:
+                exchange_lines.extend(exchange_advice(points_data, left_days))
+
+        balance = parse_points(points_data)
+        if balance is not None:
+            balance -= spent_points
+        gain = None
+        pre_points = parse_points(pre_points_data)
+        if pre_points is not None and balance is not None:
+            gain = balance + spent_points - pre_points
+
         result_lines = [
             f'email: {email_prefix}***',
+            f'result: {"ok" if checkin_data.get("code") in (0, 1) else "fail"}',
             f'status: {message}',
             f'traffic: {traffic_gb:.2f} GB',
             days_line
         ]
+        if balance is not None:
+            points_line = f'points: {balance}'
+            if gain and gain > 0:
+                points_line += f' (+{gain} today)'
+            result_lines.append(points_line)
         result_lines.extend(exchange_lines)
+        if ua_switch:
+            result_lines.append(f'ua: {ua_switch} (auto retry)')
         
         # 添加详细信息（如果存在）
         if "list" in checkin_data and checkin_data["list"]:
@@ -408,20 +468,30 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
             result_lines.append(f'reason: {reason}' + (f' (loginDevice={login_device})' if login_device else ''))
             if reason == 'device-mismatch':
                 result_lines.append('hint: 用登录网页端的浏览器重新复制完整 Cookie，或将 BROWSER_UA 设为该浏览器 UA')
-                
-        return '\n'.join(result_lines)
+
+        return account_result(checkin_data.get('code') in (0, 1), result_lines)
         
     except KeyError as e:
-        email_preview = cookie_line[:3]
-        return f'email: {email_preview}***\nerror: 缺少必要字段 {e}\n请检查cookie或账户是否过期!'
+        return account_result(False, [
+            f'email: {cookie_line[:3]}***',
+            'result: fail',
+            f'error: 缺少必要字段 {e}',
+            '请检查cookie或账户是否过期!'
+        ])
         
     except json.JSONDecodeError as e:
-        email_preview = cookie_line[:3]
-        return f'email: {email_preview}***\nerror: JSON解析失败 {e}'
+        return account_result(False, [
+            f'email: {cookie_line[:3]}***',
+            'result: fail',
+            f'error: JSON解析失败 {e}'
+        ])
         
     except requests.RequestException as e:
-        email_preview = cookie_line[:3]
-        return f'email: {email_preview}***\nerror: 网络请求失败 {str(e)}'
+        return account_result(False, [
+            f'email: {cookie_line[:3]}***',
+            'result: fail',
+            f'error: 网络请求失败 {str(e)}'
+        ])
 
 if __name__ == "__main__":
     try:
