@@ -274,37 +274,53 @@ def summarize_response(data) -> str:
     ]
     return ', '.join(parts) if parts else '无诊断字段'
 
-def auto_exchange(session: requests.Session, cookie: str, user_agent: str) -> List[str]:
-    """剩余天数不足时兑换一次，返回用于通知的结果行"""
+def auto_exchange(session: requests.Session, cookie: str, user_agent: str) -> tuple:
+    """剩余天数不足时兑换一次，返回 (通知结果行, 实际增加天数)"""
     try:
         points_data = get_points(session, cookie, user_agent)
     except (requests.RequestException, json.JSONDecodeError) as e:
-        return [f'exchange: 跳过（积分查询失败: {type(e).__name__}）']
+        return [f'exchange: 跳过（积分查询失败: {type(e).__name__}）'], 0
 
     if not isinstance(points_data, dict) or 'points' not in points_data:
-        return [f'exchange: 跳过（积分接口异常: {summarize_response(points_data)}）']
+        return [f'exchange: 跳过（积分接口异常: {summarize_response(points_data)}）'], 0
 
     try:
         points = int(float(points_data['points']))
     except (TypeError, ValueError):
-        return ['exchange: 跳过（积分格式异常）']
+        return ['exchange: 跳过（积分格式异常）'], 0
 
     picked = pick_exchange_plan(points, points_data.get('plans', {}))
     if not picked:
-        return [f'points: {points}', 'exchange: 跳过（积分不足 100）']
+        return [f'points: {points}', 'exchange: 跳过（积分不足 100）'], 0
 
     plan, need, days = picked
     try:
         result = request_exchange(session, cookie, user_agent, plan)
     except (requests.RequestException, json.JSONDecodeError) as e:
-        return [f'points: {points}', f'exchange: {plan} 请求失败（{type(e).__name__}）']
+        return [f'points: {points}', f'exchange: {plan} 请求失败（{type(e).__name__}）'], 0
 
     if isinstance(result, dict) and result.get('code') == 0:
         return [
             f'points: {points} -> {points - need}',
             f'exchange: {plan} 成功（-{need}分 / +{days}天）',
-        ]
-    return [f'points: {points}', f'exchange: {plan} 失败（{summarize_response(result)}）']
+        ], days
+    return [f'points: {points}', f'exchange: {plan} 失败（{summarize_response(result)}）'], 0
+
+def fetch_left_days(session: requests.Session, cookie: str) -> Optional[int]:
+    """兑换后重新读取剩余天数，失败时返回 None"""
+    try:
+        response = session.get(
+            url=STATUS_URL,
+            headers={"cookie": cookie},
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict) and isinstance(data.get('data'), dict):
+            return int(float(data['data']['leftDays']))
+    except (requests.RequestException, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logging.warning(f'兑换后刷新天数失败: {type(e).__name__}')
+    return None
 
 def process_account(session: requests.Session, cookie_line: str) -> str:
     """处理单个账户的签到
@@ -359,16 +375,24 @@ def process_account(session: requests.Session, cookie_line: str) -> str:
         traffic_gb = float(status_data["data"]["traffic"]) / (1024 ** 3)
         left_days = int(float(status_data["data"]["leftDays"]))
 
-        exchange_lines = (
-            auto_exchange(session, cookie_line, user_agent)
-            if left_days < EXCHANGE_THRESHOLD_DAYS else []
-        )
+        exchange_lines: List[str] = []
+        gained_days = 0
+        if left_days < EXCHANGE_THRESHOLD_DAYS:
+            exchange_lines, gained_days = auto_exchange(session, cookie_line, user_agent)
+
+        days_line = f'leftDays: {left_days}'
+        if gained_days:
+            original_days = left_days
+            refreshed = fetch_left_days(session, cookie_line)
+            # 状态接口可能有缓存，至少按兑换天数累加
+            left_days = max(refreshed or 0, original_days + gained_days)
+            days_line = f'leftDays: {original_days} -> {left_days}'
         
         result_lines = [
             f'email: {email_prefix}***',
             f'status: {message}',
             f'traffic: {traffic_gb:.2f} GB',
-            f'leftDays: {left_days}'
+            days_line
         ]
         result_lines.extend(exchange_lines)
         
