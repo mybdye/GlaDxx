@@ -207,7 +207,7 @@ def request_checkin(session: requests.Session, cookie: str, user_agent: str) -> 
     if not isinstance(challenge, dict):
         challenge = {}
     has_turnstile = bool(challenge.get('turnstile'))
-    logging.info(f'签到挑战: code={challenge.get("code")}, turnstile={"on" if has_turnstile else "off"}')
+    logging.info(f'签到挑战: code={challenge.get("code")}, turnstile={challenge.get("turnstile") or "off"}')
     nonce = challenge.get('nonce') or ''
     payload = {
         'token': API_TOKEN,
