@@ -7,6 +7,7 @@
 import os
 import json
 import base64
+import hashlib
 import logging
 from typing import Dict, List, Optional
 from urllib.parse import quote, urlsplit
@@ -112,8 +113,11 @@ CHECKIN_URL: str = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvY2hlY2tpb
 STATUS_URL: str = url_decode('aHR0cHM6Ly9nbGFkb3MuY2xvdWQvYXBpL3VzZXIvc3RhdHVz')
 API_TOKEN: str = url_decode('Z2xhZG9zLmNsb3Vk')
 CHECKIN_ORIGIN: str = '{0.scheme}://{0.netloc}'.format(urlsplit(CHECKIN_URL))
+CHALLENGE_URL: str = f'{CHECKIN_ORIGIN}/api/user/checkin/challenge'
 POINTS_URL: str = f'{CHECKIN_ORIGIN}/api/user/points'
 EXCHANGE_URL: str = f'{CHECKIN_ORIGIN}/api/user/exchange'
+# 签到证明为 SHA-256(nonce + "." + salt)，网页端同算法
+PROOF_SALT: str = url_decode('Z2xhZG9zLW9ic2VydmUtdjE=')
 
 # 剩余天数低于阈值时自动兑换一次，优先选择积分足够的最大档位
 EXCHANGE_THRESHOLD_DAYS: int = 7
@@ -124,10 +128,6 @@ EXCHANGE_PLAN_FALLBACK: Dict[str, tuple] = {
     'plan100': (100, 10),
     'plan200': (200, 30),
     'plan500': (500, 100),
-}
-
-REQUEST_DATA: Dict[str, str] = {
-    "token": API_TOKEN
 }
 
 # 服务端会校验签到请求的 UA 平台与登录设备平台是否一致，
@@ -187,12 +187,38 @@ def build_headers(cookie: str, user_agent: str) -> Dict[str, str]:
         'referer': f'{CHECKIN_ORIGIN}/console/checkin',
     }
 
+def checkin_proof(nonce: str) -> str:
+    """与网页端一致的签到证明"""
+    return hashlib.sha256(f'{nonce}.{PROOF_SALT}'.encode('utf-8')).hexdigest()
+
+def get_checkin_challenge(session: requests.Session, cookie: str, user_agent: str) -> Dict:
+    """获取签到挑战，turnstile 非空时服务端要求人机校验"""
+    response = session.get(
+        url=CHALLENGE_URL,
+        headers=build_headers(cookie, user_agent),
+        timeout=30
+    )
+    response.raise_for_status()
+    return response.json()
+
 def request_checkin(session: requests.Session, cookie: str, user_agent: str) -> Dict:
-    """发起一次签到请求并返回响应 JSON"""
+    """按网页端流程获取挑战并提交签到"""
+    challenge = get_checkin_challenge(session, cookie, user_agent)
+    if not isinstance(challenge, dict):
+        challenge = {}
+    has_turnstile = bool(challenge.get('turnstile'))
+    logging.info(f'签到挑战: code={challenge.get("code")}, turnstile={"on" if has_turnstile else "off"}')
+    nonce = challenge.get('nonce') or ''
+    payload = {
+        'token': API_TOKEN,
+        'nonce': nonce,
+        'proof': checkin_proof(nonce),
+        'tsState': 'error' if has_turnstile else 'off',
+    }
     response = session.post(
         url=CHECKIN_URL,
         headers=build_headers(cookie, user_agent),
-        data=REQUEST_DATA,
+        json=payload,
         timeout=30
     )
     response.raise_for_status()
@@ -455,6 +481,8 @@ def process_account(session: requests.Session, cookie_line: str) -> Dict:
         result_lines.extend(exchange_lines)
         if ua_switch:
             result_lines.append(f'ua: {ua_switch} (auto retry)')
+        if checkin_data.get('code') not in (0, 1):
+            result_lines.append(f'checkin: {summarize_response(checkin_data)}')
         
         # 添加详细信息（如果存在）
         if "list" in checkin_data and checkin_data["list"]:
