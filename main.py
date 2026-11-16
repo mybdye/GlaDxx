@@ -191,6 +191,65 @@ def checkin_proof(nonce: str) -> str:
     """与网页端一致的签到证明"""
     return hashlib.sha256(f'{nonce}.{PROOF_SALT}'.encode('utf-8')).hexdigest()
 
+def parse_cookie_header(cookie: str) -> List[Dict[str, str]]:
+    """把 Cookie 请求头拆成浏览器需要的键值对"""
+    cookies: List[Dict[str, str]] = []
+    for part in cookie.split(';'):
+        name, sep, value = part.strip().partition('=')
+        if sep and name:
+            cookies.append({'name': name, 'value': value, 'url': CHECKIN_ORIGIN})
+    return cookies
+
+def browser_checkin(cookie: str, user_agent: str) -> Dict:
+    """用真实浏览器完成 Turnstile 校验并提交签到"""
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    except ImportError:
+        return {'code': -1, 'message': '未安装 playwright，无法完成人机校验', 'reason': 'browser-missing'}
+
+    logging.info('签到需要人机校验，改用浏览器提交')
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                channel='chrome',
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled'],
+            )
+            try:
+                context = browser.new_context(
+                    user_agent=user_agent,
+                    locale='en-US',
+                    timezone_id='Asia/Shanghai',
+                    viewport={'width': 1280, 'height': 800},
+                )
+                context.add_cookies(parse_cookie_header(cookie))
+                page = context.new_page()
+                page.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                    "Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});"
+                    "if (navigator.userAgentData) {"
+                    "  Object.defineProperty(navigator.userAgentData, 'platform', {get: () => 'macOS'});"
+                    "}"
+                )
+                page.goto(f'{CHECKIN_ORIGIN}/console/checkin', wait_until='domcontentloaded', timeout=60000)
+                page.wait_for_selector('button.ckb', timeout=60000)
+                try:
+                    page.wait_for_selector('button.ckb:not([disabled])', timeout=15000)
+                except PlaywrightTimeoutError:
+                    return {'code': 1, 'message': '今日已签到', 'reason': 'already-checked'}
+                with page.expect_response(
+                    lambda response: '/api/user/checkin' in response.url
+                    and response.request.method == 'POST',
+                    timeout=120000,
+                ) as response_info:
+                    page.click('button.ckb')
+                return response_info.value.json()
+            finally:
+                browser.close()
+    except Exception as e:
+        logging.error(f'浏览器签到失败: {type(e).__name__}: {e}')
+        return {'code': -1, 'message': f'浏览器签到失败: {type(e).__name__}', 'reason': 'browser-error'}
+
 def get_checkin_challenge(session: requests.Session, cookie: str, user_agent: str) -> Dict:
     """获取签到挑战，turnstile 非空时服务端要求人机校验"""
     response = session.get(
@@ -208,12 +267,14 @@ def request_checkin(session: requests.Session, cookie: str, user_agent: str) -> 
         challenge = {}
     has_turnstile = bool(challenge.get('turnstile'))
     logging.info(f'签到挑战: code={challenge.get("code")}, turnstile={challenge.get("turnstile") or "off"}')
+    if has_turnstile:
+        return browser_checkin(cookie, user_agent)
     nonce = challenge.get('nonce') or ''
     payload = {
         'token': API_TOKEN,
         'nonce': nonce,
         'proof': checkin_proof(nonce),
-        'tsState': 'error' if has_turnstile else 'off',
+        'tsState': 'off',
     }
     response = session.post(
         url=CHECKIN_URL,
