@@ -254,11 +254,18 @@ def browser_checkin(cookie: str, user_agent: str) -> Dict:
                     )
                 page.add_init_script(init_script)
                 page.goto(f'{CHECKIN_ORIGIN}/console/checkin', wait_until='domcontentloaded', timeout=60000)
+                if '/login' in page.url:
+                    return {'code': -1, 'message': 'Cookie 已失效或未登录', 'reason': 'login-required'}
                 page.wait_for_selector('button.ckb', timeout=60000)
                 try:
-                    page.wait_for_selector('button.ckb:not([disabled])', timeout=15000)
+                    page.wait_for_selector('button.ckb:not([disabled])', timeout=45000)
                 except PlaywrightTimeoutError:
-                    return {'code': 1, 'message': '今日已签到', 'reason': 'already-checked'}
+                    try:
+                        label = page.inner_text('button.ckb')[:80]
+                    except Exception:
+                        label = ''
+                    logging.warning(f'签到按钮不可用: url={page.url}, label={label!r}')
+                    return {'code': -1, 'message': '浏览器签到超时（按钮不可用）', 'reason': 'browser-timeout'}
                 with page.expect_response(
                     lambda response: '/api/user/checkin' in response.url
                     and response.request.method == 'POST',

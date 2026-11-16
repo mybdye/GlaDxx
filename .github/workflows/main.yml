@@ -4,11 +4,6 @@ name: GlaDxx Checkin
 on:
   # 手动触发
   workflow_dispatch:
-    inputs:
-      browser_probe:
-        description: '只验证浏览器能否打开签到页'
-        type: boolean
-        default: false
   # 定时执行 (UTC时间，对应北京时间上午11:02)
   schedule:
     - cron: '02 3 * * *'
@@ -53,15 +48,8 @@ jobs:
           PUSHDEER_KEY: ${{ secrets.PUSHDEER_KEY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_USER_ID: ${{ secrets.TG_USER_ID }}
-          BROWSER_PROBE: ${{ inputs.browser_probe }}
         run: |
-          if [ "$BROWSER_PROBE" = "true" ]; then
-            if command -v xvfb-run >/dev/null 2>&1; then
-              xvfb-run -a python -c "import main; print(main.browser_checkin(main.COOKIES.splitlines()[0], main.DEFAULT_USER_AGENT))"
-            else
-              python -c "import main; print(main.browser_checkin(main.COOKIES.splitlines()[0], main.DEFAULT_USER_AGENT))"
-            fi
-          elif command -v xvfb-run >/dev/null 2>&1; then
+          if command -v xvfb-run >/dev/null 2>&1; then
             xvfb-run -a python main.py
           else
             python main.py
