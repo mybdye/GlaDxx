@@ -10,6 +10,7 @@ import base64
 import hashlib
 import logging
 import re
+import sys
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urlsplit
 import requests
@@ -372,11 +373,11 @@ def create_session() -> requests.Session:
     
     return session
 
-def checkin() -> None:
-    """执行签到操作并发送通知"""
+def checkin() -> bool:
+    """执行签到操作并发送通知，全部账号失败或未配置时返回 False"""
     if not COOKIES.strip():
         logging.warning("⚠️ 未配置COOKIES环境变量")
-        return
+        return False
     
     session = create_session()
     results: List[Dict] = []
@@ -388,10 +389,15 @@ def checkin() -> None:
         result = process_account(session, cookie_line)
         results.append(result)
 
+    if not results:
+        logging.error("❌ COOKIES 中没有有效账号")
+        return False
+
     # 发送聚合通知
     ok_count = sum(1 for result in results if result['ok'])
     body = '\n\n---\n\n'.join('\n'.join(result['lines']) for result in results)
     push_notification(f'accounts: {ok_count}/{len(results)} ok\n\n{body}')
+    return ok_count > 0
 
 def summarize_response(data) -> str:
     """提取响应中的诊断字段，不输出 Cookie 等敏感内容"""
@@ -617,7 +623,8 @@ def process_account(session: requests.Session, cookie_line: str) -> Dict:
 
 if __name__ == "__main__":
     try:
-        checkin()
+        if not checkin():
+            sys.exit(1)
     except Exception as e:
         logging.error(f"程序执行出错: {e}")
         raise
