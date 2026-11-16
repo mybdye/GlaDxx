@@ -9,7 +9,8 @@ import json
 import base64
 import hashlib
 import logging
-from typing import Dict, List, Optional
+import re
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urlsplit
 import requests
 from requests.adapters import HTTPAdapter
@@ -176,6 +177,16 @@ def ua_platform(user_agent: str) -> str:
             return name
     return 'custom UA'
 
+# navigator.platform / userAgentData.platform 需要跟着 UA 平台走
+BROWSER_PLATFORM: Dict[str, Tuple[str, str]] = {
+    'Windows': ('Win32', 'Windows'),
+    'macOS': ('MacIntel', 'macOS'),
+    'Linux': ('Linux x86_64', 'Linux'),
+    'iPhone': ('iPhone', 'iOS'),
+    'iPad': ('iPad', 'iOS'),
+    'Android': ('Linux armv8l', 'Android'),
+}
+
 def build_headers(cookie: str, user_agent: str) -> Dict[str, str]:
     """构造与浏览器一致的请求头，UA 平台需与登录设备一致"""
     return {
@@ -208,14 +219,19 @@ def browser_checkin(cookie: str, user_agent: str) -> Dict:
         return {'code': -1, 'message': '未安装 playwright，无法完成人机校验', 'reason': 'browser-missing'}
 
     logging.info('签到需要人机校验，改用浏览器提交')
+    headless = not os.environ.get('DISPLAY')
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 channel='chrome',
-                headless=True,
+                headless=headless,
                 args=['--disable-blink-features=AutomationControlled'],
             )
             try:
+                platform_names = BROWSER_PLATFORM.get(ua_platform(user_agent))
+                version = getattr(browser, 'version', '') or ''
+                if version:
+                    user_agent = re.sub(r'Chrome/\d+(?:\.\d+)*', f'Chrome/{version}', user_agent)
                 context = browser.new_context(
                     user_agent=user_agent,
                     locale='en-US',
@@ -224,13 +240,19 @@ def browser_checkin(cookie: str, user_agent: str) -> Dict:
                 )
                 context.add_cookies(parse_cookie_header(cookie))
                 page = context.new_page()
-                page.add_init_script(
+                init_script = (
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-                    "Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});"
-                    "if (navigator.userAgentData) {"
-                    "  Object.defineProperty(navigator.userAgentData, 'platform', {get: () => 'macOS'});"
-                    "}"
                 )
+                if platform_names:
+                    platform_name, ua_data_platform = platform_names
+                    init_script += (
+                        f"Object.defineProperty(navigator, 'platform', {{get: () => '{platform_name}'}});"
+                        "if (navigator.userAgentData) {"
+                        f"  Object.defineProperty(navigator.userAgentData, 'platform', "
+                        f"{{get: () => '{ua_data_platform}'}});"
+                        "}"
+                    )
+                page.add_init_script(init_script)
                 page.goto(f'{CHECKIN_ORIGIN}/console/checkin', wait_until='domcontentloaded', timeout=60000)
                 page.wait_for_selector('button.ckb', timeout=60000)
                 try:
@@ -283,7 +305,11 @@ def request_checkin(session: requests.Session, cookie: str, user_agent: str) -> 
         timeout=30
     )
     response.raise_for_status()
-    return response.json()
+    result = response.json()
+    if isinstance(result, dict) and result.get('reason') == 'turnstile':
+        logging.warning('签到被人机校验拦截，改用浏览器重试')
+        return browser_checkin(cookie, user_agent)
+    return result
 
 def get_points(session: requests.Session, cookie: str, user_agent: str) -> Dict:
     """查询当前积分与可兑换档位"""
